@@ -18,6 +18,12 @@ ERP_USER      = os.getenv("ERP_USER", "").strip()
 ERP_PASSWORD  = os.getenv("ERP_PASSWORD", "").strip()
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "").strip()
 
+print("--- STARTUP DEBUG ---")
+print(f"ERP_USER is loaded: {'YES' if ERP_USER else 'NO'} (length: {len(ERP_USER)})")
+print(f"ERP_PASSWORD is loaded: {'YES' if ERP_PASSWORD else 'NO'} (length: {len(ERP_PASSWORD)})")
+print(f"DISCORD_TOKEN is loaded: {'YES' if DISCORD_TOKEN else 'NO'} (length: {len(DISCORD_TOKEN)})")
+print("---------------------")
+
 try:
     _user_id_str = os.getenv("DISCORD_USER_ID", "").strip()
     DISCORD_USER_ID = int(_user_id_str) if _user_id_str else 0
@@ -104,6 +110,7 @@ def erp_login():
         return session, None
 
     print(f"❌ Login failed. Final URL: {login_resp.url}")
+    print(f"--- FAILED LOGIN BODY (First 500 chars) ---\n{body[:500]}\n-----------------------------------------")
     return None, "❌ Login failed. Check ERP_USER and ERP_PASSWORD variables."
 
 # ─────────────────────────────────────────
