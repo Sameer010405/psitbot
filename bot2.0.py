@@ -4,16 +4,18 @@ from discord.ext import tasks
 from bs4 import BeautifulSoup
 from datetime import datetime
 import asyncio
-from flask import Flask
-from threading import Thread
 import os
 import re
+from dotenv import load_dotenv
+
+# Load environment variables from .env file automatically (useful for local testing)
+load_dotenv()
 
 # ─────────────────────────────────────────
-# CONFIGURATION — fill these in via Environment Variables
+# CONFIGURATION — fill these in via Environment Variables / GitHub Secrets
 # ─────────────────────────────────────────
-ERP_USER     = os.getenv("ERP_USER", "").strip()
-ERP_PASSWORD = os.getenv("ERP_PASSWORD", "").strip()
+ERP_USER      = os.getenv("ERP_USER", "").strip()
+ERP_PASSWORD  = os.getenv("ERP_PASSWORD", "").strip()
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "").strip()
 
 try:
@@ -34,7 +36,6 @@ ATTENDANCE_URL = f"{BASE_URL}/Student/MyAttendanceDetail"
 
 DAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 
-
 # ─────────────────────────────────────────
 # LOGIN
 # ─────────────────────────────────────────
@@ -49,7 +50,6 @@ def erp_login():
         ),
     })
 
-    # Step 1: Load homepage to get CSRF / hidden fields
     try:
         r = session.get(BASE_URL, timeout=15)
         r.raise_for_status()
@@ -58,7 +58,6 @@ def erp_login():
 
     soup = BeautifulSoup(r.text, "html.parser")
 
-    # Step 2: Find form action
     form = soup.find("form")
     if form and form.get("action"):
         action = form["action"]
@@ -71,7 +70,6 @@ def erp_login():
     else:
         post_url = BASE_URL
 
-    # Step 3: Build payload (include hidden CSRF fields)
     payload = {
         "username": ERP_USER,
         "password": ERP_PASSWORD,
@@ -91,8 +89,6 @@ def erp_login():
     body       = login_resp.text
     body_lower = body.lower()
 
-    # Strict login check: look for post-login indicators
-    # "logout" link = definitely logged in; also check for student name or dashboard
     logged_in = (
         "logout" in body_lower
         or "/logout" in body_lower
@@ -100,7 +96,6 @@ def erp_login():
         or ("student" in final_url and "login" not in final_url)
     )
 
-    # Explicit failure signals
     if "invalid" in body_lower or "incorrect" in body_lower or "failed" in body_lower:
         logged_in = False
 
@@ -109,9 +104,7 @@ def erp_login():
         return session, None
 
     print(f"❌ Login failed. Final URL: {login_resp.url}")
-    print(f"   Body snippet: {body[:500]}")
-    return None, "❌ Login failed. Check ERP_USER and ERP_PASSWORD environment variables."
-
+    return None, "❌ Login failed. Check ERP_USER and ERP_PASSWORD variables."
 
 # ─────────────────────────────────────────
 # Session Cache
@@ -127,27 +120,18 @@ def get_session():
         try:
             check = _cached_session.get(f"{BASE_URL}/Student/", timeout=10)
             if "logout" in check.text.lower():
-                return _cached_session, None   # still valid ✅
+                return _cached_session, None   
         except Exception:
-            pass  # fall through to re-login
+            pass  
 
     _cached_session, err = erp_login()
     return _cached_session, err
 
-
 # ─────────────────────────────────────────
-# TIME TABLE  (FIXED: column-based layout)
+# TIME TABLE
 # ─────────────────────────────────────────
 
 def get_classes_for_day(session, day_offset=0):
-    """
-    Fetch timetable for a given day offset (0=today, 1=tomorrow).
-    Returns (day_name, classes_list_or_str).
-
-    Handles BOTH common ERP table layouts:
-      • Column-based  – days are header columns, rows are time slots
-      • Row-based     – rows are days, columns are time slots
-    """
     try:
         tt_resp = session.get(TT_URL, timeout=15)
         tt_resp.raise_for_status()
@@ -161,7 +145,6 @@ def get_classes_for_day(session, day_offset=0):
 
     table = tt_soup.find("table")
     if not table:
-        # Try finding any div/section that might hold the timetable
         return day_name, "⚠️ Couldn't find timetable table. ERP layout may have changed."
 
     rows = table.find_all("tr")
@@ -170,8 +153,6 @@ def get_classes_for_day(session, day_offset=0):
 
     headers = [th.get_text(strip=True) for th in rows[0].find_all(["th", "td"])]
 
-    # ── Try COLUMN-based layout first (most common for PSIT ERP) ──
-    # Header row contains day names as columns
     day_col = None
     for i, h in enumerate(headers):
         if day_name.lower() in h.lower():
@@ -195,8 +176,6 @@ def get_classes_for_day(session, day_offset=0):
                 })
         return day_name, classes
 
-    # ── Fallback: ROW-based layout ──
-    # Each row represents a day; first column is the day name
     classes = []
     for row in rows[1:]:
         cols = row.find_all(["td", "th"])
@@ -214,7 +193,6 @@ def get_classes_for_day(session, day_offset=0):
                     })
             return day_name, classes
 
-    # Nothing matched at all — return raw debug info
     header_str = " | ".join(headers[:10])
     return day_name, (
         f"⚠️ Could not find '{day_name}' in the timetable.\n"
@@ -222,16 +200,10 @@ def get_classes_for_day(session, day_offset=0):
         f"Please check TT_URL or report this to the developer."
     )
 
-
 def parse_time(time_str):
-    """
-    Parse a time string like '9:00 AM', '09:00', '9:00-10:00 AM' into today's datetime.
-    Returns datetime or None.
-    """
     if not time_str:
         return None
 
-    # Extract first time token: "9:00 AM", "09:00", "9:00"
     match = re.search(r'(\d{1,2}:\d{2})\s*(AM|PM)?', time_str, re.IGNORECASE)
     if not match:
         return None
@@ -249,24 +221,17 @@ def parse_time(time_str):
     except ValueError:
         return None
 
-
 def get_today_classes(session):
     return get_classes_for_day(session, day_offset=0)
-
 
 def format_classes(classes):
     return [f"🕐 **{c['time_label']}** — {c['subject']}" for c in classes]
 
-
 # ─────────────────────────────────────────
-# ATTENDANCE  (FIXED: broader regex + fallbacks)
+# ATTENDANCE
 # ─────────────────────────────────────────
 
 def get_attendance(session):
-    """
-    Fetch overall attendance from ERP.
-    Returns dict {present, total, percent} or error string.
-    """
     try:
         resp = session.get(ATTENDANCE_URL, timeout=15)
         resp.raise_for_status()
@@ -279,24 +244,17 @@ def get_attendance(session):
 
     percent_val = None
 
-    # Pattern 1: "Attendance % With PF : 80.65"
     m = re.search(r'attendance\s*%\s*with\s*pf\s*[:\-]\s*([\d.]+)', text_low)
-    if m:
-        percent_val = float(m.group(1))
+    if m: percent_val = float(m.group(1))
 
-    # Pattern 2: "Attendance % Without PF : 80.65"
     if percent_val is None:
         m = re.search(r'attendance\s*%\s*without\s*pf\s*[:\-]\s*([\d.]+)', text_low)
-        if m:
-            percent_val = float(m.group(1))
+        if m: percent_val = float(m.group(1))
 
-    # Pattern 3: "Overall Attendance: 80.65%"
     if percent_val is None:
         m = re.search(r'overall\s+attendance\s*[:\-]\s*([\d.]+)\s*%', text_low)
-        if m:
-            percent_val = float(m.group(1))
+        if m: percent_val = float(m.group(1))
 
-    # Pattern 4: Any percentage near the word "attendance"
     if percent_val is None:
         for m in re.finditer(r'([\d]{2,3}\.?\d*)\s*%', full_text):
             idx = m.start()
@@ -310,7 +268,6 @@ def get_attendance(session):
 
     percent_str = f"{percent_val:.2f}%"
 
-    # Try to find total lectures
     present = None
     total   = None
 
@@ -319,7 +276,6 @@ def get_attendance(session):
         total = int(m_total.group(1))
         present = round(total * (percent_val / 100.0))
     else:
-        # Try "Present: X / Total: Y" pattern
         m_pt = re.search(r'present\s*[:\-]?\s*(\d+)\s*[/\\|]\s*(\d+)', text_low)
         if m_pt:
             present = int(m_pt.group(1))
@@ -327,19 +283,14 @@ def get_attendance(session):
 
     return {"present": present, "total": total, "percent": percent_str}
 
-
 def attendance_emoji(percent_str):
     try:
         pct = float(str(percent_str).replace("%", ""))
-        if pct >= 75:
-            return "✅"
-        elif pct >= 65:
-            return "⚠️"
-        else:
-            return "🚨"
+        if pct >= 75: return "✅"
+        elif pct >= 65: return "⚠️"
+        else: return "🚨"
     except (ValueError, AttributeError):
         return "❓"
-
 
 # ─────────────────────────────────────────
 # BUNK BUDGET
@@ -354,10 +305,7 @@ def calc_bunk_budget(attendance):
     except (TypeError, ValueError, KeyError):
         return None
 
-    # How many can be skipped: present / (total + x) >= 0.75
     can_bunk    = max(0, int(present / 0.75 - total))
-
-    # How many needed to reach 75%: (present + x) / (total + x) >= 0.75
     need_attend = 0
     if total > 0 and present / total < 0.75:
         need_attend = max(0, int((0.75 * total - present) / 0.25) + 1)
@@ -368,7 +316,6 @@ def calc_bunk_budget(attendance):
         "present":     present,
         "total":       total,
     }
-
 
 # ─────────────────────────────────────────
 # Discord Bot
@@ -392,14 +339,13 @@ COMMANDS_HELP = """
 
 reminders_sent = set()
 reminders_date = None
-
+last_sent_date = None 
 
 @client.event
 async def on_ready():
     print(f"✅ Logged in as {client.user}")
     daily_timetable.start()
     class_reminders.start()
-
 
 @client.event
 async def on_message(message):
@@ -418,13 +364,14 @@ async def on_message(message):
         return
 
     thinking = await message.channel.send("⏳ Fetching from ERP...")
-    session, err = get_session()
+    
+    session, err = await asyncio.to_thread(get_session)
     if err:
         await thinking.edit(content=err)
         return
 
     if cmd == "!today":
-        day_name, classes = get_today_classes(session)
+        day_name, classes = await asyncio.to_thread(get_today_classes, session)
         if isinstance(classes, list) and classes:
             lines = "\n".join(format_classes(classes))
             reply = f"📅 **Classes for {day_name}:**\n{lines}"
@@ -435,7 +382,7 @@ async def on_message(message):
         await thinking.edit(content=reply)
 
     elif cmd == "!tomorrow":
-        day_name, classes = get_classes_for_day(session, day_offset=1)
+        day_name, classes = await asyncio.to_thread(get_classes_for_day, session, 1)
         if isinstance(classes, list) and classes:
             lines = "\n".join(format_classes(classes))
             reply = f"📅 **Classes for {day_name}:**\n{lines}"
@@ -446,7 +393,7 @@ async def on_message(message):
         await thinking.edit(content=reply)
 
     elif cmd == "!attendance":
-        attendance = get_attendance(session)
+        attendance = await asyncio.to_thread(get_attendance, session)
         if isinstance(attendance, dict):
             emoji = attendance_emoji(attendance["percent"])
             if attendance["present"] and attendance["total"]:
@@ -461,7 +408,7 @@ async def on_message(message):
         await thinking.edit(content=reply)
 
     elif cmd == "!bunk":
-        attendance = get_attendance(session)
+        attendance = await asyncio.to_thread(get_attendance, session)
         budget = calc_bunk_budget(attendance)
         if budget is None:
             await thinking.edit(
@@ -486,13 +433,13 @@ async def on_message(message):
             )
         await thinking.edit(content=reply)
 
-
 @tasks.loop(minutes=1)
 async def daily_timetable():
+    global last_sent_date
     now = datetime.now()
-    if now.hour == SEND_HOUR and now.minute == SEND_MINUTE:
+    if now.hour == SEND_HOUR and now.minute == SEND_MINUTE and last_sent_date != now.date():
         await send_timetable()
-
+        last_sent_date = now.date()
 
 @tasks.loop(minutes=1)
 async def class_reminders():
@@ -508,11 +455,11 @@ async def class_reminders():
     if not (7 <= now.hour < 19):
         return
 
-    session, err = get_session()
+    session, err = await asyncio.to_thread(get_session)
     if err:
         return
 
-    _, classes = get_today_classes(session)
+    _, classes = await asyncio.to_thread(get_today_classes, session)
     if not isinstance(classes, list):
         return
 
@@ -540,7 +487,6 @@ async def class_reminders():
             reminders_sent.add(reminder_key)
             print(f"[{now.strftime('%H:%M')}] Sent reminder for {cls['subject']}")
 
-
 async def send_timetable():
     try:
         user = await client.fetch_user(DISCORD_USER_ID)
@@ -548,13 +494,13 @@ async def send_timetable():
         print("❌ Could not find Discord user.")
         return
 
-    session, err = get_session()
+    session, err = await asyncio.to_thread(get_session)
     if err:
         await user.send(err)
         return
 
-    day_name, classes = get_today_classes(session)
-    attendance        = get_attendance(session)
+    day_name, classes = await asyncio.to_thread(get_today_classes, session)
+    attendance        = await asyncio.to_thread(get_attendance, session)
 
     if isinstance(classes, list) and classes:
         tt_lines   = "\n".join(format_classes(classes))
@@ -586,32 +532,8 @@ async def send_timetable():
     await user.send(msg)
     print(f"[{datetime.now().strftime('%H:%M')}] Sent timetable + attendance to {user}")
 
-
-# ─────────────────────────────────────────
-# Keep-alive Web Server (for Render free tier)
-# ─────────────────────────────────────────
-
-app = Flask('')
-
-@app.route('/')
-def home():
-    return "Bot is running 24/7!"
-
-def run_server():
-    import logging
-    log = logging.getLogger('werkzeug')
-    log.setLevel(logging.ERROR)
-    port = int(os.environ.get('PORT', 8080))
-    app.run(host='0.0.0.0', port=port)
-
-def keep_alive():
-    t = Thread(target=run_server, daemon=True)
-    t.start()
-
-
 # ─────────────────────────────────────────
 # Entry point
 # ─────────────────────────────────────────
 
-keep_alive()
 client.run(DISCORD_TOKEN)
