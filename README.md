@@ -11,7 +11,7 @@ A powerful Discord bot designed to automate your PSIT ERP life. Get your timetab
 ## ✨ Features
 
 - 🌅 **Morning Briefing:** Automatically sends your daily timetable and current attendance every morning at 7:00 AM IST.
-- 🔔 **Smart Reminders:** Pings you exactly 2 minutes before each class starts so you're never late.
+- 🔔 **Smart Reminders:** Pings you exactly 15 minutes before each class starts so you're never late.
 - 📊 **Attendance Tracking:** Real-time overall attendance fetching from the ERP.
 - 📉 **Bunk Budget:** Calculates exactly how many classes you can skip while staying above 75%, or how many you need to attend to recover.
 - ⚡ **Session Caching:** Optimized login logic to avoid repeated authentication and potential ERP lockouts.
