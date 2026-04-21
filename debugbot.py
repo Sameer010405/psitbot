@@ -45,7 +45,7 @@ ATTENDANCE_URL = f"{BASE_URL}/Student/MyAttendanceDetail"
 
 DAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 
-# ─────────────────────────────────────────
+# ──────────────���──────────────────────────
 # LOGIN
 # ─────────────────────────────────────────
 
@@ -527,9 +527,9 @@ async def class_reminders():
             continue
 
         minutes_until = (start_time - now).total_seconds() / 60
-        if 0 <= minutes_until <= 15:
+        if 0 <= minutes_until <= 15:  # ✅ CHANGED: 15-minute reminder instead of 2 minutes
             await user.send(
-                f"🔔 **Class Starting in ~15 minutes!**\n"
+                f"🔔 **Class Starting in ~15 minutes!**\n"  # ✅ CHANGED: Updated message
                 f"📚 **{cls['subject']}** at **{cls['time_label']}**\n"
                 f"_Get ready!_"
             )
