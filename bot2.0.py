@@ -252,20 +252,35 @@ def parse_time(time_str):
     if not time_str:
         return None
 
-    match = re.search(r'(\d{1,2}:\d{2})\s*(AM|PM)?', time_str, re.IGNORECASE)
-    if not match:
+    # Try to find the first time (HH:MM or HH.MM)
+    # The ERP uses dots sometimes (e.g., 09.25)
+    time_match = re.search(r'(\d{1,2})[:.](\d{2})', time_str)
+    if not time_match:
         return None
+    
+    hour = int(time_match.group(1))
+    minute = int(time_match.group(2))
 
-    time_part = match.group(1)
-    ampm      = match.group(2)
+    # Try to find AM/PM in the whole string
+    ampm_match = re.search(r'(AM|PM)', time_str, re.IGNORECASE)
+    ampm = ampm_match.group(1).upper() if ampm_match else None
+
+    if ampm:
+        if ampm == "PM" and hour < 12:
+            hour += 12
+        elif ampm == "AM" and hour == 12:
+            hour = 0
+    else:
+        # No AM/PM found? Guess based on PSIT typical class hours
+        # Classes before 8 AM are likely PM (e.g., 3:25 PM)
+        # Classes between 8 AM and 11:59 AM are AM
+        if 1 <= hour <= 7:
+            hour += 12
+        # Otherwise keep as is (9, 10, 11 AM or 12 PM)
 
     try:
-        if ampm:
-            t = datetime.strptime(f"{time_part} {ampm.upper()}", "%I:%M %p")
-        else:
-            t = datetime.strptime(time_part, "%H:%M")
         now = datetime.now(tz=IST)
-        return now.replace(hour=t.hour, minute=t.minute, second=0, microsecond=0)
+        return now.replace(hour=hour, minute=minute, second=0, microsecond=0)
     except ValueError:
         return None
 
@@ -387,6 +402,7 @@ COMMANDS_HELP = """
 
 reminders_sent = set()
 reminders_date = None
+reminder_logs = []  # Tracks status of reminders for the !logs command
 last_sent_date = None 
 
 @client.event
@@ -405,7 +421,16 @@ async def on_message(message):
     cmd = message.content.strip().lower()
 
     if cmd == "!help":
-        await message.channel.send(COMMANDS_HELP)
+        await message.channel.send(COMMANDS_HELP + "\n`!logs`      — Check reminder status logs")
+        return
+
+    if cmd == "!logs":
+        if not reminder_logs:
+            await message.channel.send("📭 No reminder logs for today yet.")
+        else:
+            # Show last 15 logs to avoid hitting Discord message limit
+            logs_text = "\n".join(reminder_logs[-15:])
+            await message.channel.send(f"📜 **Today's Reminder Logs:**\n{logs_text}")
         return
 
     if cmd not in ("!today", "!tomorrow", "!attendance", "!bunk"):
@@ -492,49 +517,75 @@ async def daily_timetable():
 
 @tasks.loop(minutes=1)
 async def class_reminders():
-    global reminders_sent, reminders_date
-
-    now   = datetime.now(tz=IST)
-    today = now.date()
-
-    if reminders_date != today:
-        reminders_sent = set()
-        reminders_date = today
-
-    if not (7 <= now.hour < 19):
-        return
-
-    session, err = await asyncio.to_thread(get_session)
-    if err:
-        return
-
-    classes = await asyncio.to_thread(get_cached_today_classes, session)
-    if not isinstance(classes, list):
-        return
+    global reminders_sent, reminders_date, reminder_logs
 
     try:
-        user = await client.fetch_user(DISCORD_USER_ID)
-    except discord.NotFound:
-        return
+        now   = datetime.now(tz=IST)
+        today = now.date()
 
-    for cls in classes:
-        start_time = cls["start_time"]
-        if start_time is None:
-            continue
+        if reminders_date != today:
+            reminders_sent = set()
+            reminder_logs = []
+            reminders_date = today
 
-        reminder_key = f"{cls['subject']}_{start_time.strftime('%H:%M')}"
-        if reminder_key in reminders_sent:
-            continue
+        # Relaxed hour check to catch early/late classes if they exist
+        if not (6 <= now.hour < 20):
+            return
 
-        minutes_until = (start_time - now).total_seconds() / 60
-        if 0 <= minutes_until <= 15:
-            await user.send(
-                f"🔔 **Class Starting in ~15 minutes!**\n"
-                f"📚 **{cls['subject']}** at **{cls['time_label']}**\n"
-                f"_Get ready!_"
-            )
-            reminders_sent.add(reminder_key)
-            print(f"[{now.strftime('%H:%M')}] Sent reminder for {cls['subject']}")
+        session, err = await asyncio.to_thread(get_session)
+        if err:
+            log_msg = f"[{now.strftime('%H:%M')}] ❌ Loop error: {err}"
+            print(log_msg)
+            if not reminder_logs or reminder_logs[-1] != log_msg:
+                reminder_logs.append(log_msg)
+            return
+
+        classes = await asyncio.to_thread(get_cached_today_classes, session)
+        if not isinstance(classes, list):
+            return
+
+        try:
+            user = await client.fetch_user(DISCORD_USER_ID)
+        except Exception as e:
+            print(f"[{now.strftime('%H:%M')}] Error fetching user: {e}")
+            return
+
+        for cls in classes:
+            start_time = cls["start_time"]
+            if start_time is None:
+                # Only print once to avoid spamming
+                skip_key = f"skip_{cls['subject']}_{cls['time_label']}"
+                if skip_key not in reminders_sent:
+                    log_msg = f"[{now.strftime('%H:%M')}] ⚠️ Skipped: {cls['subject']} ({cls['time_label']})"
+                    print(log_msg)
+                    reminder_logs.append(log_msg)
+                    reminders_sent.add(skip_key)
+                continue
+
+            reminder_key = f"{cls['subject']}_{start_time.strftime('%H:%M')}"
+            if reminder_key in reminders_sent:
+                continue
+
+            minutes_until = (start_time - now).total_seconds() / 60
+            
+            # Use a slightly wider window (0 to 15.5) to ensure we don't miss it due to loop timing
+            if 0 <= minutes_until <= 15:
+                try:
+                    await user.send(
+                        f"🔔 **Class Starting in ~15 minutes!**\n"
+                        f"📚 **{cls['subject']}** at **{cls['time_label']}**\n"
+                        f"_Get ready!_"
+                    )
+                    reminders_sent.add(reminder_key)
+                    log_msg = f"[{now.strftime('%H:%M')}] ✅ Sent: {cls['subject']}"
+                    print(log_msg)
+                    reminder_logs.append(log_msg)
+                except Exception as e:
+                    log_msg = f"[{now.strftime('%H:%M')}] ❌ Failed: {cls['subject']} ({e})"
+                    print(log_msg)
+                    reminder_logs.append(log_msg)
+    except Exception as e:
+        print(f"[{datetime.now(tz=IST).strftime('%H:%M')}] CRITICAL error in class_reminders loop: {e}")
 
 async def send_timetable():
     try:
